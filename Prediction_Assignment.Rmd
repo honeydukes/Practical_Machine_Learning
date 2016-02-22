@@ -1,0 +1,202 @@
+---
+title: "How Well Are You Exercising?"  
+output: html_document
+---
+####Objective  
+Many people quantify the amount of exercise they do, but rarely do they qualify how well they do the exercises. The goal of this assignment to use the data from accelerometers on belt, forearm, arm and dumbbell of 6 participants at various time stamps, to predict the manner (i.e. how well) they do the exercises.  
+
+####Load buildData and validation Data   
+```{r, cache=TRUE}
+library(ggplot2); library(caret); library(randomForest); library(gbm)
+
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileUrl, destfile = "./buildData.csv")
+buildData <- read.csv("./buildData.csv")
+
+fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileUrl, destfile = "./validation.csv")
+validation <- read.csv("./validation.csv")
+```
+
+####Cross Validation  
+
+The data in buildData is partitioned into training and testing subsets (70:30 ratio).  
+The training subset will be used to train prediction models.  
+The testing subset will be used as cross validation to evaluate the accuracies of various models.   
+The validation set will be the hold-out set until we do a final prediction with the chosen model.  
+
+```{r, cache=TRUE}
+set.seed(123)
+inTrain <- createDataPartition(y=buildData$classe, p=0.7, list=FALSE)
+training <- buildData[inTrain,]; testing <- buildData[-inTrain,]
+dim(training); dim(testing); dim(validation)
+```
+Observation : The last column of training and testing data sets contains the "classe" variable. However, in the validation data set, the last column is "problem_id", and not the "classe" variable.  
+
+####Exploratory Data Analysis and Data Cleaning  
+```{r, cache=TRUE, results="hide"}
+summary(training)
+```
+Observation from summary table : (1) columns 1 to 5 are for username and time stamp; (2) there are many columns with more than 13000 rows of NAs or white spaces (too many NAs to make meaningful predictor). We need to remove such columns.  
+
+We use a "rm_col" logical vector to identify the columns that have > 13000 NAs or white spaces.  
+```{r, cache=TRUE}
+rm_col <- vector("logical", length=dim(training)[2])
+for (i in 1:dim(training)[2]) {
+  rm_col[i] <- FALSE
+  if (sum(is.na(training[,i])==TRUE|training[,i]=="")>13000) {rm_col[i] <- TRUE}
+}
+```
+
+We also identify columns 1 to 5 as TRUE (to be removed) as these are just username and time stamps.  
+```{r, cache=TRUE}
+rm_col[1:5] <- TRUE
+```
+
+Next, we do a preliminary removal of columns in the training data set. We also need to remove the same columns in the testing and validation data sets.    
+```{r, cache=TRUE}
+training <- training[,rm_col==FALSE]
+testing <- testing[,rm_col==FALSE]
+validation <- validation[,rm_col==FALSE]
+dim(training); dim(testing); dim(validation)
+```
+Observation : We see that the number of columns has been reduced to 54 at this point in time.  
+
+We also remove the last column of the validation data as that is just a problem_id (not the "classe" variable).    
+```{r, cache=TRUE}
+validation <- validation[,-55]
+dim(validation)
+```
+
+We print the summary table of this tidier data.  
+```{r, cache=TRUE, results="hide"}
+summary(training)
+```
+Observation from summary table: (1) There are no more NAs and white spaces. (2) There are some outliers for gyros_dumbbell_x/y/z and gyros_forearm_x/y/z.  
+
+Next, we do a boxplot to detect if there are any outliers.   
+```{r, cache=TRUE}
+qplot(classe,gyros_dumbbell_x, data=training, fill=classe,geom=c("boxplot")) 
+#qplot(classe,gyros_dumbbell_y, data=training, fill=classe,geom=c("boxplot")) 
+#qplot(classe,gyros_dumbbell_z, data=training, fill=classe,geom=c("boxplot")) 
+```
+Observation : There is one outlier in classe A for gyros_dumbell_x, y and z.  
+
+We set out to identify the row number of any outliers.   
+```{r, cache=TRUE, results="hide"}
+for (i in 1:dim(training)[1]) {
+  if (training$gyros_dumbbell_x[i] == min(training$gyros_dumbbell_x)) print(i)
+  if (training$gyros_dumbbell_y[i] == max(training$gyros_dumbbell_y)) print(i)
+  if (training$gyros_dumbbell_z[i] == max(training$gyros_dumbbell_z)) print(i)
+  if (training$gyros_forearm_x[i] == min(training$gyros_forearm_x)) print(i)
+  if (training$gyros_forearm_y[i] == max(training$gyros_forearm_y)) print(i)
+  if (training$gyros_forearm_z[i] == max(training$gyros_forearm_z)) print(i)
+}
+```
+
+The outlier is identified to be row 3767. So we remove that particular row.  
+```{r, cache=TRUE}
+training <- training[-3767,]
+```
+
+Next, we look for variables that have near-zero variance.  
+```{r, cache=TRUE}
+nsv <- nearZeroVar(training, saveMetrics=TRUE)
+which(nsv[4]==TRUE)
+```
+
+The 1st column has been identified to have near-zero variance. So we remove it since this variable has very little variability and will not be a good predictor.     
+```{r, cache=TRUE}
+training <- training[,-1]
+testing <- testing[,-1]
+validation <- validation[,-1]
+```
+
+Now that the outler and near-zero-variance cases have been removed, we can do some meaningful correlation calculations.  
+```{r, cache=TRUE, results="hide"}
+M <- abs(cor(training[,-54]))
+diag(M) <- 0
+which(M > 0.8, arr.ind=TRUE)
+```
+Observations : These are the highly correlated columns : (2,4), (2,5,10,11), (3,9,12), (19,20), (22,25), (26,27), (29,35), (30,37).    
+As a check, we plot the paired graphs of columns 2,5,10,11.  
+```{r, cache=TRUE}
+library(GGally)  
+ggpairs(training[,c(2,5,10,11)])   
+```
+
+We set out to remove some of the highly correlated columns so as to reduce the variance when doing prediction.   
+```{r, cache=TRUE}
+training <- training[,c(-4,-5,-8,-10,-11,-12,-20,-25,-27,-35,-37)]
+testing <- testing[,c(-4,-5,-8,-10,-11,-12,-20,-25,-27,-35,-37)]
+validation <- validation[,c(-4,-5,-8,-10,-11,-12,-20,-25,-27,-35,-37)]
+dim(training); dim(testing); dim(validation)
+```
+The number of variables are now reduced to 42 (from the original 159).  
+
+
+####Model Building  
+
+We build 2 different models using "boosting" and "random forest".  
+
+#####Why preProcess="pca"?  
+ 
+We have removed the highly correlated (r > 0.8) variables found in "Exploratory Data Analysis and Data Cleaning" section. What about those variables that are moderately strongly correlated (e.g. 0.7 < r < 0.8)? This is where we will use Principal Component Analysis (PCA) to handle such cases.  PCA will take a weighted combination of such predictors. The benefits are (a) reduced number of predictors and (2) reduced noise.  
+
+#####Why "boosting"?  
+
+Method used is "gbm" (boosting with Classification Trees). As this method runs through a set of Classification Trees iteratively, calculates the weights based on the errors, then adds them up together, the result is a stronger overall classifier.   
+
+What do I think the expected out-of-sample error is : Earlier on, I tested using method = "rpart" (classification tree). The accuracy based on one Classification tree is poor (approx. 40%"). Hence, I expect the out-of-sample error for "gbm" to be lower than "rpart".   
+
+#####Why "random forest"?   
+
+This method is an extension of many bootstrap aggregating (where re-sampling is done for cross validation). It is supposed to be highly accurate as it reduces the variance. However, the computing speed is a concern for such a large training data set. As a compromise, I used only 3-folds (number=3 in train function).  
+
+What do I think the expected out-of-sample error is : As this method is supposed to be highly accurate, I expect the out-of-sample error to be very low.  
+
+```{r, cache=TRUE, results="hide"}
+set.seed(2844)
+mod1 <- train(classe ~., method="gbm",data=training, preProcess="pca", verbose=FALSE)
+mod2 <- train(classe ~., method="rf",data=training, preProcess="pca", trControl=trainControl(method="cv"), number=3)
+```
+
+Then we predict on the testing set.  
+```{r, cache=TRUE, results="hide"}
+pred1 <- predict(mod1, testing)
+pred2 <- predict(mod2, testing)
+```
+
+And do an evaluation on the testing set.  
+```{r, cache=TRUE}
+confusionMatrix(pred1, testing$classe)$overall[1]
+confusionMatrix(pred2, testing$classe)$overall[1]
+```
+Result : (1) The accuracy for "gbm" is reasonably good at 80%. (2) The accuracy for "rf" is extremely good at 97%.  
+
+
+####Model Stacking   
+
+I then fitted a new model that combines the 2 earlier classifiers using method = "gam" (generalized additive models).    
+
+What do I think the expected out-of-sample error is : I had hoped that it would be lower than before as the lecture videos mentioned that "even simple blending can be useful". But I know the accuracy of 97% for "rf" in model 2 above is going to be hard to beat.     
+
+```{r, cache=TRUE}
+predDF12 <- data.frame(pred1, pred2, classe=testing$classe)
+combModFit12 <- train(classe ~., method="gam",data=predDF12)
+combPred12 <- predict(combModFit12, predDF12)
+confusionMatrix(combPred12, testing$classe)$overall[1]
+```
+Result : Contrary to my expectation that accuracy will improve, the accuracy for the combined model has drastically reduced to 47%. Hence, the out-of-sample error is worse than before. This is most likely due to over-fitting.  
+
+
+####Final Model Selection and Final Validation  
+Based on the highest accuracy on the testing set, the final selected model is the one based on "rf" (random forest in model 2).  
+Finally, we use this selected model to predict on validation data set.    
+```{r, cache=TRUE}
+pred2V <- predict(mod2, validation)
+pred2V
+```
+Result : This scored 20/20 in the prediction quiz. So the predictions for this validation data set has 100% accuracy.  
+
+####End of Assignment  
